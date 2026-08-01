@@ -3,10 +3,12 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
+    "postinstall": "prisma generate",
     "dev": "nodemon ./bin/www",
     "start": "node ./bin/www",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
+    "prisma:migrate:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio"
   },
   "dependencies": {
@@ -17,10 +19,10 @@
     "express": "~4.16.1",
     "hbs": "~4.0.4",
     "http-errors": "~1.6.3",
-    "morgan": "~1.9.1"
+    "morgan": "~1.9.1",
+    "prisma": "6.19.3"
   },
   "devDependencies": {
-    "nodemon": "^3.1.14",
-    "prisma": "6.19.3"
+    "nodemon": "^3.1.14"
   }
 }

@@ -3,6 +3,7 @@ const prismaClient = require("../lib/prismaClient");
 const {
   createConversation,
   createConversationTitle,
+  getConversationById,
   getRecentMessages,
   parseConversationId,
   saveMessage,
@@ -10,7 +11,7 @@ const {
   toMessageDto,
   touchConversation,
 } = require("../services/conversationService");
-const { requestDeepSeekReply } = require("../services/deepSeekChatService");
+const { requestDeepSeekReply, streamDeepSeekReply } = require("../services/deepSeekChatService");
 const { createHttpError } = require("../utils/httpError");
 
 const supportedModels = new Set(["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"]);
@@ -53,16 +54,7 @@ async function resolveConversation({ conversationId, userId, modelName, userCont
   }
 
   const parsedConversationId = parseConversationId(conversationId);
-  const conversation = await prismaClient.conversation.findFirst({
-    where: {
-      id: parsedConversationId,
-      userId,
-    },
-  });
-
-  if (!conversation) {
-    throw createHttpError(404, "Conversation was not found.", "CONVERSATION_NOT_FOUND");
-  }
+  const conversation = await getConversationById(userId, parsedConversationId);
 
   if (conversation.model !== modelName) {
     return touchConversation(conversation.id, { model: modelName });
@@ -109,10 +101,18 @@ async function createChatCompletion(req, res, next) {
       throw error;
     }
 
-    const assistantMessage = await saveMessage(conversation.id, "assistant", completionResult.reply);
-    const updatedConversation = await touchConversation(conversation.id, {
-      model: modelName,
-    });
+    const [assistantMessage, updatedConversation] = await prismaClient.$transaction(
+      async (tx) => {
+        const msg = await tx.message.create({
+          data: { conversationId: conversation.id, role: "assistant", content: completionResult.reply },
+        });
+        const conv = await tx.conversation.update({
+          where: { id: conversation.id },
+          data: { model: modelName },
+        });
+        return [msg, conv];
+      },
+    );
 
     res.json({
       conversation: toConversationDto(updatedConversation),
@@ -124,7 +124,120 @@ async function createChatCompletion(req, res, next) {
   }
 }
 
+async function createChatCompletionStream(req, res, next) {
+  let conversation;
+  let userMessage;
+  let modelName;
+
+  try {
+    const userContent = sanitizeUserContent(req.body.content);
+    assertValidUserContent(userContent);
+
+    modelName = resolveModelName(req.body.model);
+    conversation = await resolveConversation({
+      conversationId: req.body.conversationId,
+      userId: req.user.id,
+      modelName,
+      userContent,
+    });
+
+    userMessage = await saveMessage(conversation.id, "user", userContent);
+  } catch (error) {
+    next(error);
+    return;
+  }
+
+  // 设置 SSE 响应头
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+
+  // 发送用户消息确认
+  res.write(`data: ${JSON.stringify({ type: "user_message", message: toMessageDto(userMessage) })}\n\n`);
+
+  let fullReply = "";
+
+  try {
+    const chatMessages = await getRecentMessages(conversation.id);
+    const streamResponse = await streamDeepSeekReply(chatMessages, modelName);
+    const reader = streamResponse.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith("data: ")) continue;
+
+        const data = trimmed.slice(6);
+        if (data === "[DONE]") continue;
+
+        try {
+          const parsed = JSON.parse(data);
+          const delta = parsed.choices?.[0]?.delta?.content;
+          if (delta) {
+            fullReply += delta;
+            res.write(`data: ${JSON.stringify({ type: "chunk", content: delta })}\n\n`);
+          }
+        } catch { /* skip malformed chunks */ }
+      }
+    }
+  } catch (error) {
+    // 流中断：无任何回复时告知客户端
+    if (!fullReply) {
+      const errMsg = error.isOperational ? error.message : "AI service unavailable.";
+      res.write(`data: ${JSON.stringify({ type: "error", message: errMsg })}\n\n`);
+      res.end();
+      return;
+    }
+    // 已有部分回复则继续保存
+  }
+
+  // 持久化 assistant 消息
+  try {
+    const [assistantMessage, updatedConversation] = await prismaClient.$transaction(
+      async (tx) => {
+        const msg = await tx.message.create({
+          data: {
+            conversationId: conversation.id,
+            role: "assistant",
+            content: fullReply || "(empty reply)",
+          },
+        });
+        const conv = await tx.conversation.update({
+          where: { id: conversation.id },
+          data: { model: modelName },
+        });
+        return [msg, conv];
+      },
+    );
+
+    res.write(
+      `data: ${JSON.stringify({
+        type: "done",
+        conversation: toConversationDto(updatedConversation),
+        message: toMessageDto(assistantMessage),
+      })}\n\n`,
+    );
+  } catch (error) {
+    res.write(`data: ${JSON.stringify({ type: "error", message: "Failed to save message." })}\n\n`);
+  }
+
+  res.end();
+}
+
 module.exports = {
   createChatCompletion,
+  createChatCompletionStream,
   resolveModelName,
 };

@@ -43,6 +43,18 @@ function parseConversationId(conversationId) {
   return parsedConversationId;
 }
 
+async function getConversationById(userId, parsedId) {
+  const conversation = await prismaClient.conversation.findFirst({
+    where: { id: parsedId, userId },
+  });
+
+  if (!conversation) {
+    throw createHttpError(404, "Conversation was not found.", "CONVERSATION_NOT_FOUND");
+  }
+
+  return conversation;
+}
+
 async function createConversation({ userId, model, title }) {
   return prismaClient.conversation.create({
     data: {
@@ -89,20 +101,13 @@ async function getConversationWithMessages(userId, conversationId) {
 
 async function deleteConversation(userId, conversationId) {
   const parsedConversationId = parseConversationId(conversationId);
-  const conversation = await prismaClient.conversation.findFirst({
-    where: {
-      id: parsedConversationId,
-      userId,
-    },
+  const { count } = await prismaClient.conversation.deleteMany({
+    where: { id: parsedConversationId, userId },
   });
 
-  if (!conversation) {
+  if (count === 0) {
     throw createHttpError(404, "Conversation was not found.", "CONVERSATION_NOT_FOUND");
   }
-
-  await prismaClient.conversation.delete({
-    where: { id: conversation.id },
-  });
 }
 
 async function saveMessage(conversationId, role, content) {
@@ -139,6 +144,7 @@ module.exports = {
   createConversation,
   createConversationTitle,
   deleteConversation,
+  getConversationById,
   getConversationWithMessages,
   getRecentMessages,
   listConversations,

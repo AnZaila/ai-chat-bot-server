@@ -60,21 +60,27 @@ async function registerUser({ email, password, username }) {
   const normalizedEmail = normalizeEmail(email);
   assertValidCredentials(normalizedEmail, password);
 
-  const existingUser = await prismaClient.user.findUnique({
-    where: { email: normalizedEmail },
-    select: { id: true },
-  });
+  return prismaClient.$transaction(async (tx) => {
+    const existingUser = await tx.user.findUnique({
+      where: { email: normalizedEmail },
+      select: { id: true },
+    });
 
-  if (existingUser) {
-    throw createHttpError(409, "This email is already registered.", "EMAIL_EXISTS");
-  }
+    if (existingUser) {
+      throw createHttpError(409, "This email is already registered.", "EMAIL_EXISTS");
+    }
 
-  return prismaClient.user.create({
-    data: {
-      email: normalizedEmail,
-      username: normalizeUsername(username),
-      passwordHash: await hashPassword(password),
-    },
+    const user = await tx.user.create({
+      data: {
+        email: normalizedEmail,
+        username: normalizeUsername(username),
+        passwordHash: await hashPassword(password),
+      },
+    });
+
+    // 不将 passwordHash 传出 service 层
+    const { passwordHash: _, ...publicUser } = user;
+    return publicUser;
   });
 }
 
@@ -90,7 +96,9 @@ async function loginUser({ email, password }) {
     throw createHttpError(401, "Email or password is incorrect.", "INVALID_CREDENTIALS");
   }
 
-  return user;
+  // 不将 passwordHash 传出 service 层
+  const { passwordHash: _, ...publicUser } = user;
+  return publicUser;
 }
 
 module.exports = {

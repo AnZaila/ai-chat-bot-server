@@ -7,6 +7,7 @@
 var app = require('../app');
 var debug = require('debug')('ai-chat-bot-server:server');
 var http = require('http');
+var prismaClient = require('../lib/prismaClient');
 
 /**
  * Get port from environment and store in Express.
@@ -89,3 +90,25 @@ function onListening() {
     : 'port ' + addr.port;
   debug('Listening on ' + bind);
 }
+
+/**
+ * Graceful shutdown: close HTTP server then disconnect Prisma.
+ */
+function gracefulShutdown(signal) {
+  debug(`Received ${signal}, starting graceful shutdown...`);
+  server.close(async () => {
+    debug('HTTP server closed.');
+    await prismaClient.$disconnect();
+    debug('Prisma disconnected.');
+    process.exit(0);
+  });
+
+  // 强制退出：5 秒内未完成则强制终止
+  setTimeout(() => {
+    console.error('Forced shutdown after timeout.');
+    process.exit(1);
+  }, 5000);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));

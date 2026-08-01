@@ -1,9 +1,10 @@
 const express = require("express");
-const { createChatCompletion } = require("../controllers/chatController");
+const { createChatCompletion, createChatCompletionStream } = require("../controllers/chatController");
 const { requireAuth } = require("../middleware/authMiddleware");
 
 const chatRoutes = express.Router();
 
 chatRoutes.post("/", requireAuth, createChatCompletion);
+chatRoutes.post("/stream", requireAuth, createChatCompletionStream);
 
 module.exports = chatRoutes;
