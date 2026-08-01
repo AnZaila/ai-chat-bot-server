@@ -1,35 +1,35 @@
-const prismaClient = require("../lib/prismaClient");
 const runtimeConfig = require("../config/runtimeConfig");
-const { verifyAuthToken } = require("../services/tokenService");
+const { findActiveSession } = require("../services/sessionService");
+
+function getRequestToken(req) {
+  const bearerToken =
+    typeof req.headers.authorization === "string" &&
+    req.headers.authorization.startsWith("Bearer ")
+      ? req.headers.authorization.slice(7)
+      : "";
+
+  return req.cookies[runtimeConfig.authCookieName] || bearerToken;
+}
 
 async function requireAuth(req, res, next) {
   try {
-    const bearerToken = req.headers.authorization?.startsWith("Bearer ")
-      ? req.headers.authorization.slice(7)
-      : "";
-    const token = req.cookies[runtimeConfig.authCookieName] || bearerToken;
-    const userId = verifyAuthToken(token);
+    const token = getRequestToken(req);
+    const session = await findActiveSession(token);
 
-    if (!userId) {
-      res.status(401).json({ message: "Please sign in first." });
+    if (!session?.user) {
+      res.status(401).json({
+        code: "UNAUTHENTICATED",
+        message: "Please sign in first.",
+      });
       return;
     }
 
-    const user = await prismaClient.user.findUnique({
-      where: { id: userId },
-      select: {
-        id: true,
-        email: true,
-        username: true,
-      },
-    });
-
-    if (!user) {
-      res.status(401).json({ message: "Please sign in first." });
-      return;
-    }
-
-    req.user = user;
+    req.authToken = token;
+    req.session = {
+      id: session.id,
+      expiresAt: session.expiresAt,
+    };
+    req.user = session.user;
     next();
   } catch (error) {
     next(error);

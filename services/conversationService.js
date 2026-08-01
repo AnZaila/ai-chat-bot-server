@@ -1,4 +1,6 @@
 const prismaClient = require("../lib/prismaClient");
+const runtimeConfig = require("../config/runtimeConfig");
+const { createHttpError } = require("../utils/httpError");
 
 function createConversationTitle(content) {
   const normalizedContent = String(content || "").replace(/\s+/g, " ").trim();
@@ -35,9 +37,7 @@ function parseConversationId(conversationId) {
   const parsedConversationId = Number(conversationId);
 
   if (!Number.isInteger(parsedConversationId) || parsedConversationId <= 0) {
-    const error = new Error("Conversation was not found.");
-    error.status = 404;
-    throw error;
+    throw createHttpError(404, "Conversation was not found.", "CONVERSATION_NOT_FOUND");
   }
 
   return parsedConversationId;
@@ -57,7 +57,7 @@ async function listConversations(userId) {
   const conversations = await prismaClient.conversation.findMany({
     where: { userId },
     orderBy: { updatedAt: "desc" },
-    take: 60,
+    take: runtimeConfig.conversationListLimit,
   });
 
   return conversations.map(toConversationDto);
@@ -78,9 +78,7 @@ async function getConversationWithMessages(userId, conversationId) {
   });
 
   if (!conversation) {
-    const error = new Error("Conversation was not found.");
-    error.status = 404;
-    throw error;
+    throw createHttpError(404, "Conversation was not found.", "CONVERSATION_NOT_FOUND");
   }
 
   return {
@@ -99,9 +97,7 @@ async function deleteConversation(userId, conversationId) {
   });
 
   if (!conversation) {
-    const error = new Error("Conversation was not found.");
-    error.status = 404;
-    throw error;
+    throw createHttpError(404, "Conversation was not found.", "CONVERSATION_NOT_FOUND");
   }
 
   await prismaClient.conversation.delete({

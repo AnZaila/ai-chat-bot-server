@@ -11,6 +11,7 @@ const {
   touchConversation,
 } = require("../services/conversationService");
 const { requestDeepSeekReply } = require("../services/deepSeekChatService");
+const { createHttpError } = require("../utils/httpError");
 
 const supportedModels = new Set(["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"]);
 
@@ -24,29 +25,22 @@ function resolveModelName(modelName) {
   return supportedModels.has(normalizedModelName) ? normalizedModelName : runtimeConfig.deepSeekModel;
 }
 
-function sanitizeChatMessages(messages) {
-  if (!Array.isArray(messages)) {
-    return [];
-  }
-
-  return messages
-    .filter((message) => {
-      return (
-        message &&
-        (message.role === "user" || message.role === "assistant") &&
-        typeof message.content === "string" &&
-        message.content.trim().length > 0
-      );
-    })
-    .slice(-12)
-    .map((message) => ({
-      role: message.role,
-      content: message.content.trim(),
-    }));
-}
-
 function sanitizeUserContent(content) {
   return typeof content === "string" ? content.trim() : "";
+}
+
+function assertValidUserContent(content) {
+  if (!content) {
+    throw createHttpError(400, "Please send a valid message.", "EMPTY_MESSAGE");
+  }
+
+  if (content.length > runtimeConfig.chatMessageMaxLength) {
+    throw createHttpError(
+      413,
+      `Message is too long. Please keep it under ${runtimeConfig.chatMessageMaxLength} characters.`,
+      "MESSAGE_TOO_LONG",
+    );
+  }
 }
 
 async function resolveConversation({ conversationId, userId, modelName, userContent }) {
@@ -67,9 +61,7 @@ async function resolveConversation({ conversationId, userId, modelName, userCont
   });
 
   if (!conversation) {
-    const error = new Error("Conversation was not found.");
-    error.status = 404;
-    throw error;
+    throw createHttpError(404, "Conversation was not found.", "CONVERSATION_NOT_FOUND");
   }
 
   if (conversation.model !== modelName) {
@@ -82,13 +74,7 @@ async function resolveConversation({ conversationId, userId, modelName, userCont
 async function createChatCompletion(req, res, next) {
   try {
     const userContent = sanitizeUserContent(req.body.content);
-
-    if (!userContent) {
-      res.status(400).json({
-        message: "Please send a valid message.",
-      });
-      return;
-    }
+    assertValidUserContent(userContent);
 
     const modelName = resolveModelName(req.body.model);
     const conversation = await resolveConversation({
@@ -100,7 +86,29 @@ async function createChatCompletion(req, res, next) {
 
     const userMessage = await saveMessage(conversation.id, "user", userContent);
     const chatMessages = await getRecentMessages(conversation.id);
-    const completionResult = await requestDeepSeekReply(chatMessages, modelName);
+    let completionResult;
+
+    try {
+      completionResult = await requestDeepSeekReply(chatMessages, modelName);
+    } catch (error) {
+      if (error.isOperational && String(error.code || "").startsWith("DEEPSEEK_")) {
+        const updatedConversation = await touchConversation(conversation.id, {
+          model: modelName,
+        });
+
+        res.status(error.status || 502).json({
+          code: error.code,
+          conversation: toConversationDto(updatedConversation),
+          messages: [toMessageDto(userMessage)],
+          message: error.message,
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      throw error;
+    }
+
     const assistantMessage = await saveMessage(conversation.id, "assistant", completionResult.reply);
     const updatedConversation = await touchConversation(conversation.id, {
       model: modelName,
@@ -119,5 +127,4 @@ async function createChatCompletion(req, res, next) {
 module.exports = {
   createChatCompletion,
   resolveModelName,
-  sanitizeChatMessages,
 };
